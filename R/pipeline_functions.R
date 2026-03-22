@@ -1,16 +1,22 @@
+# Path and environment helpers -------------------------------------------------
+# These helpers make every input/output path explicit so the pipeline stays
+# reproducible across machines and working directories.
+
 get_project_paths <- function(project_root = ".") {
-  root <- normalizePath(project_root, winslash = "/", mustWork = TRUE)
-  hypotheses_candidates <- c("hypotheses.md", "hypotheses")
-  hypotheses_path <- ""
+  root <- normalizePath(project_root, winslash = "/", mustWork = TRUE) # Resolve the project folder once so all later file references are absolute and stable.
+  hypotheses_candidates <- c("hypotheses.md", "hypotheses") # Accept either a markdown or plain-text hypotheses file.
+  hypotheses_path <- "" # Keep this empty unless a hypotheses file is actually present.
 
   for (candidate in hypotheses_candidates) {
-    candidate_path <- file.path(root, candidate)
+    candidate_path <- file.path(root, candidate) # Build the candidate path inside the project root.
     if (file.exists(candidate_path)) {
-      hypotheses_path <- candidate_path
-      break
+      hypotheses_path <- candidate_path # Store the first match so downstream reports can cite the theoretical source.
+      break # Stop after the first match because only one hypotheses source is needed.
     }
   }
 
+  # Collect every file path in one list so the rest of the pipeline can pass
+  # around a single object instead of recomputing locations.
   list(
     root = root,
     input_file = file.path(root, "data_final_FLORIDA.xlsx"),
@@ -30,6 +36,7 @@ get_project_paths <- function(project_root = ".") {
   )
 }
 
+# Create the output folders before any tables, figures, or reports are written.
 ensure_output_dirs <- function(paths) {
   dirs <- c(
     paths$output_dir,
@@ -42,34 +49,37 @@ ensure_output_dirs <- function(paths) {
 
   for (dir_path in dirs) {
     if (!dir.exists(dir_path)) {
-      dir.create(dir_path, recursive = TRUE, showWarnings = FALSE)
+      dir.create(dir_path, recursive = TRUE, showWarnings = FALSE) # Recursive creation avoids failures when parent folders do not yet exist.
     }
   }
 }
 
+# Python is only needed as a fallback reader when readxl is unavailable.
 find_python_command <- function() {
-  candidates <- c(Sys.which("python"), Sys.which("py"))
-  candidates <- candidates[nzchar(candidates)]
+  candidates <- c(Sys.which("python"), Sys.which("py")) # Check both common Windows entry points.
+  candidates <- candidates[nzchar(candidates)] # Drop empty strings returned when an executable is missing.
   if (length(candidates) == 0L) {
-    return("")
+    return("") # An empty string signals "no fallback available" to the caller.
   }
   candidates[[1]]
 }
 
+# Pandoc is optional and is only used to convert the Markdown report into Word.
 find_pandoc_path <- function() {
-  local_appdata <- Sys.getenv("LOCALAPPDATA")
+  local_appdata <- Sys.getenv("LOCALAPPDATA") # On Windows, RStudio's bundled Pandoc often lives under LOCALAPPDATA.
   candidates <- c(
     Sys.which("pandoc"),
     file.path(local_appdata, "Pandoc", "pandoc.exe")
   )
-  candidates <- unique(candidates[nzchar(candidates)])
-  matches <- candidates[file.exists(candidates)]
+  candidates <- unique(candidates[nzchar(candidates)]) # Remove duplicates and blank entries before checking the filesystem.
+  matches <- candidates[file.exists(candidates)] # Keep only paths that truly exist on disk.
   if (length(matches) == 0L) {
     return("")
   }
   matches[[1]]
 }
 
+# pdflatex is also optional; it compiles the LaTeX report into a PDF article.
 find_pdflatex_path <- function() {
   candidates <- c(
     Sys.which("pdflatex"),
@@ -83,6 +93,8 @@ find_pdflatex_path <- function() {
   matches[[1]]
 }
 
+# Record which Tobit-related packages are available so the report can document
+# the computational environment transparently.
 get_package_availability <- function() {
   data.frame(
     Package = c("survival", "AER", "VGAM", "censReg"),
@@ -96,17 +108,114 @@ get_package_availability <- function() {
   )
 }
 
+# Dependency bootstrap ---------------------------------------------------------
+# These helpers make the pipeline more self-contained by installing the minimum
+# R packages it needs before any modeling or report generation starts.
+
+get_cran_repo <- function() {
+  repos <- getOption("repos")
+
+  if (length(repos) == 0L) {
+    repos <- c(CRAN = "https://cloud.r-project.org")
+  }
+
+  cran_repo <- unname(repos["CRAN"])
+  if (length(cran_repo) == 0L || is.na(cran_repo) || !nzchar(cran_repo) || identical(cran_repo, "@CRAN@")) {
+    repos["CRAN"] <- "https://cloud.r-project.org"
+  }
+
+  repos
+}
+
+install_r_package_if_missing <- function(package_name, required = TRUE) {
+  if (requireNamespace(package_name, quietly = TRUE)) {
+    return(TRUE)
+  }
+
+  message("Installing missing R package '", package_name, "' from CRAN...")
+  old_repos <- getOption("repos")
+  on.exit(options(repos = old_repos), add = TRUE)
+  options(repos = get_cran_repo())
+
+  install_attempt <- tryCatch(
+    {
+      utils::install.packages(
+        package_name,
+        dependencies = c("Depends", "Imports")
+      )
+      TRUE
+    },
+    error = function(e) {
+      message("Installation failed for package '", package_name, "': ", conditionMessage(e))
+      FALSE
+    }
+  )
+
+  installed <- install_attempt && requireNamespace(package_name, quietly = TRUE)
+  if (!installed && required) {
+    stop(
+      "Required R package '", package_name, "' is not available and could not be installed automatically.",
+      call. = FALSE
+    )
+  }
+
+  installed
+}
+
+python_excel_fallback_available <- function() {
+  python_cmd <- find_python_command()
+  if (!nzchar(python_cmd)) {
+    return(FALSE)
+  }
+
+  check_output <- system2(
+    command = python_cmd,
+    args = c("-c", shQuote("import pandas, openpyxl")),
+    stdout = TRUE,
+    stderr = TRUE
+  )
+
+  status <- attr(check_output, "status")
+  is.null(status) || identical(status, 0L)
+}
+
+ensure_pipeline_dependencies <- function() {
+  install_r_package_if_missing("survival", required = TRUE)
+
+  readxl_available <- install_r_package_if_missing("readxl", required = FALSE)
+  if (!readxl_available && !python_excel_fallback_available()) {
+    stop(
+      "The pipeline needs either the R package 'readxl' or a Python fallback with both 'pandas' and 'openpyxl'.",
+      call. = FALSE
+    )
+  }
+
+  invisible(
+    list(
+      survival = TRUE,
+      readxl = readxl_available,
+      python_excel_fallback = python_excel_fallback_available(),
+      pandoc = nzchar(find_pandoc_path()),
+      pdflatex = nzchar(find_pdflatex_path())
+    )
+  )
+}
+
+# Basic statistical helper functions -------------------------------------------
+# These wrappers standardize missing-data handling so tables do not break when
+# a subgroup has no usable observations.
+
 safe_mean <- function(x) {
   if (all(is.na(x))) {
-    return(NA_real_)
+    return(NA_real_) # Preserve missingness instead of returning NaN for all-missing inputs.
   }
-  mean(x, na.rm = TRUE)
+  mean(x, na.rm = TRUE) # Descriptive means ignore sporadic missing values.
 }
 
 safe_sd <- function(x) {
-  x <- x[!is.na(x)]
+  x <- x[!is.na(x)] # Standard deviation requires the observed values only.
   if (length(x) <= 1L) {
-    return(NA_real_)
+    return(NA_real_) # SD is undefined for 0 or 1 observation.
   }
   stats::sd(x)
 }
@@ -114,17 +223,20 @@ safe_sd <- function(x) {
 safe_se <- function(x) {
   x <- x[!is.na(x)]
   if (length(x) <= 1L) {
-    return(NA_real_)
+    return(NA_real_) # A standard error needs at least two observations to estimate spread.
   }
-  stats::sd(x) / sqrt(length(x))
+  stats::sd(x) / sqrt(length(x)) # SE quantifies sampling uncertainty around the mean.
 }
 
+# Formatting and export helpers ------------------------------------------------
+# These functions turn model outputs and summaries into publication-ready text.
+
 format_number <- function(x, digits = 2) {
-  ifelse(is.na(x), "NA", formatC(x, digits = digits, format = "f"))
+  ifelse(is.na(x), "NA", formatC(x, digits = digits, format = "f")) # Fixed-point formatting keeps tables aligned across outputs.
 }
 
 format_pct <- function(x, digits = 1) {
-  ifelse(is.na(x), "NA", paste0(formatC(100 * x, digits = digits, format = "f"), "%"))
+  ifelse(is.na(x), "NA", paste0(formatC(100 * x, digits = digits, format = "f"), "%")) # Convert proportions to percentages for easier interpretation.
 }
 
 format_p_value <- function(p) {
@@ -138,15 +250,16 @@ format_p_value <- function(p) {
 }
 
 format_ci <- function(low, high, digits = 2) {
-  paste0("[", format_number(low, digits), ", ", format_number(high, digits), "]")
+  paste0("[", format_number(low, digits), ", ", format_number(high, digits), "]") # Confidence intervals are printed in the conventional lower-to-upper format.
 }
 
 write_text_file <- function(lines, file_path) {
-  con <- file(file_path, open = "wb")
-  on.exit(close(con), add = TRUE)
-  writeLines(enc2utf8(lines), con = con, useBytes = TRUE)
+  con <- file(file_path, open = "wb") # Open a binary connection so encoding is controlled explicitly.
+  on.exit(close(con), add = TRUE) # Guarantee the file handle closes even if writing fails midway.
+  writeLines(enc2utf8(lines), con = con, useBytes = TRUE) # Force UTF-8 output so special characters survive across report formats.
 }
 
+# Convert a data frame into simple GitHub-flavored Markdown.
 to_markdown_table <- function(df, digits = 3) {
   if (!is.data.frame(df) || ncol(df) == 0L) {
     return("")
@@ -155,7 +268,7 @@ to_markdown_table <- function(df, digits = 3) {
   format_cell <- function(x) {
     if (is.numeric(x)) {
       if (all(is.na(x) | abs(x - round(x)) < .Machine$double.eps^0.5)) {
-        return(formatC(x, digits = 0, format = "f"))
+        return(formatC(x, digits = 0, format = "f")) # Print near-integers without decimals to avoid visual clutter.
       }
       return(formatC(x, digits = digits, format = "f"))
     }
@@ -167,7 +280,7 @@ to_markdown_table <- function(df, digits = 3) {
     x
   }
 
-  formatted <- lapply(df, format_cell)
+  formatted <- lapply(df, format_cell) # Format column-by-column so numeric precision stays consistent.
   formatted_df <- as.data.frame(formatted, stringsAsFactors = FALSE, check.names = FALSE)
   header <- paste0("| ", paste(names(formatted_df), collapse = " | "), " |")
   separator <- paste0("| ", paste(rep("---", ncol(formatted_df)), collapse = " | "), " |")
@@ -178,6 +291,7 @@ to_markdown_table <- function(df, digits = 3) {
   c(header, separator, rows)
 }
 
+# Escape LaTeX-sensitive characters so text content does not break compilation.
 escape_latex <- function(x) {
   x <- as.character(x)
   x[is.na(x)] <- "NA"
@@ -188,6 +302,7 @@ escape_latex <- function(x) {
   x
 }
 
+# Build a LaTeX table, optionally using longtable for multi-page model output.
 to_latex_table <- function(df, caption, label, digits = 3, longtable = FALSE) {
   if (!is.data.frame(df) || ncol(df) == 0L) {
     return("")
@@ -208,8 +323,8 @@ to_latex_table <- function(df, caption, label, digits = 3, longtable = FALSE) {
 
   formatted <- lapply(df, format_cell)
   formatted_df <- as.data.frame(formatted, stringsAsFactors = FALSE, check.names = FALSE)
-  formatted_df[] <- lapply(formatted_df, escape_latex)
-  col_spec <- paste(rep("l", ncol(formatted_df)), collapse = "")
+  formatted_df[] <- lapply(formatted_df, escape_latex) # Escape after formatting so symbols such as % in labels are safe.
+  col_spec <- paste(rep("l", ncol(formatted_df)), collapse = "") # Left alignment makes mixed numeric/text columns easier to read.
   header <- paste(escape_latex(names(formatted_df)), collapse = " & ")
   body <- apply(formatted_df, 1, function(row) paste(row, collapse = " & "))
 
@@ -247,8 +362,9 @@ to_latex_table <- function(df, caption, label, digits = 3, longtable = FALSE) {
   )
 }
 
+# Insert a previously written PNG into the LaTeX report.
 latex_include_graphic <- function(file_path, caption, label, width = "0.92\\textwidth") {
-  rel_path <- gsub("\\\\", "/", file_path)
+  rel_path <- gsub("\\\\", "/", file_path) # LaTeX is more reliable with forward slashes, even on Windows.
   c(
     "\\begin{figure}[H]",
     "\\centering",
@@ -259,16 +375,20 @@ latex_include_graphic <- function(file_path, caption, label, width = "0.92\\text
   )
 }
 
+# Data ingestion and validation ------------------------------------------------
+# The analysis starts from one Excel workbook. Validation is strict so the later
+# statistical steps fail fast if the data structure is not what the models expect.
+
 read_source_data <- function(input_file) {
   if (!file.exists(input_file)) {
     stop("Input file not found: ", input_file, call. = FALSE)
   }
 
   if (requireNamespace("readxl", quietly = TRUE)) {
-    return(as.data.frame(readxl::read_xlsx(input_file)))
+    return(as.data.frame(readxl::read_xlsx(input_file))) # Prefer readxl because it preserves workbook content directly inside R.
   }
 
-  python_cmd <- find_python_command()
+  python_cmd <- find_python_command() # Fall back to pandas only when readxl is unavailable.
   if (!nzchar(python_cmd)) {
     stop(
       "The package 'readxl' is not installed and no Python interpreter was found for the fallback reader.",
@@ -278,8 +398,8 @@ read_source_data <- function(input_file) {
 
   py_code <- paste(
     "import pandas as pd",
-    sprintf("df = pd.read_excel(r'''%s''')", normalizePath(input_file, winslash = "/", mustWork = TRUE)),
-    "print(df.to_csv(index=False))",
+    sprintf("df = pd.read_excel(r'''%s''')", normalizePath(input_file, winslash = "/", mustWork = TRUE)), # Use a raw string so Windows paths survive unchanged.
+    "print(df.to_csv(index=False))", # Emit CSV text back to R so the rest of the code needs only one import path.
     sep = "\n"
   )
 
@@ -291,7 +411,7 @@ read_source_data <- function(input_file) {
     stderr = TRUE
   )
 
-  status <- attr(csv_lines, "status")
+  status <- attr(csv_lines, "status") # system2 stores the exit code as an attribute on captured output.
   if (!is.null(status) && status != 0L) {
     stop(
       "The Python fallback reader failed.\n",
@@ -301,13 +421,15 @@ read_source_data <- function(input_file) {
   }
 
   utils::read.csv(
-    text = paste(csv_lines, collapse = "\n"),
+    text = paste(csv_lines, collapse = "\n"), # Parse the returned CSV text into a base-R data frame.
     na.strings = c("", "NA", "NaN"),
     check.names = FALSE,
     stringsAsFactors = FALSE
   )
 }
 
+# Verify that the workbook contains every variable needed for scoring,
+# reshaping, descriptives, and hypothesis tests.
 validate_source_data <- function(df) {
   participant_vars <- c(
     "id", "commitment", "age", "economic_status", "sex", "faculty_player",
@@ -318,7 +440,7 @@ validate_source_data <- function(df) {
     "PT11", "FS12", "PD13", "EC14", "PT15", "FS16", "EC17", "PD18", "EC19",
     "FS20", "PT21", "PD22", "PT23", "EC24", "FS25", "PT26", "PD27", "EC28"
   )
-  scenario_vars <- unlist(lapply(1:10, function(stage) {
+  scenario_vars <- unlist(lapply(1:10, function(stage) { # Each stage should contribute the same repeated-measures fields.
     c(
       sprintf("faculty_neg_1_s%d", stage),
       sprintf("faculty_neg_2_s%d", stage),
@@ -332,7 +454,7 @@ validate_source_data <- function(df) {
   }))
 
   required_vars <- c(participant_vars, empathy_vars, scenario_vars)
-  missing_vars <- setdiff(required_vars, names(df))
+  missing_vars <- setdiff(required_vars, names(df)) # Any missing column would make the derived variables or models invalid.
 
   if (length(missing_vars) > 0L) {
     stop(
@@ -345,21 +467,25 @@ validate_source_data <- function(df) {
   invisible(TRUE)
 }
 
+# Psychometric scoring and analytic data construction --------------------------
+
+# Compute a respondent-level mean only when enough item responses are present.
 row_mean_with_floor <- function(df, cols, min_non_missing = ceiling(length(cols) * 0.8)) {
-  available <- rowSums(!is.na(df[, cols, drop = FALSE]))
-  values <- rowMeans(df[, cols, drop = FALSE], na.rm = TRUE)
-  values[available < min_non_missing] <- NA_real_
+  available <- rowSums(!is.na(df[, cols, drop = FALSE])) # Count non-missing items per participant.
+  values <- rowMeans(df[, cols, drop = FALSE], na.rm = TRUE) # Use the mean so scales stay on the original response metric.
+  values[available < min_non_missing] <- NA_real_ # Drop scores that are based on too little information.
   values
 }
 
+# Classical Cronbach's alpha summarizes internal consistency across items.
 cronbach_alpha <- function(df, cols) {
   item_frame <- df[, cols, drop = FALSE]
-  item_frame <- item_frame[stats::complete.cases(item_frame), , drop = FALSE]
+  item_frame <- item_frame[stats::complete.cases(item_frame), , drop = FALSE] # Use complete item sets because alpha depends on a common covariance matrix.
   if (nrow(item_frame) < 2L || ncol(item_frame) < 2L) {
     return(NA_real_)
   }
 
-  item_vars <- apply(item_frame, 2, stats::var)
+  item_vars <- apply(item_frame, 2, stats::var) # Alpha compares the sum of item variances with total-score variance.
   total_scores <- rowSums(item_frame)
   total_var <- stats::var(total_scores)
 
@@ -367,10 +493,11 @@ cronbach_alpha <- function(df, cols) {
     return(NA_real_)
   }
 
-  k <- ncol(item_frame)
+  k <- ncol(item_frame) # Number of items in the scale.
   (k / (k - 1)) * (1 - sum(item_vars) / total_var)
 }
 
+# Standardize a variable so one unit equals one sample standard deviation.
 z_score <- function(x) {
   if (all(is.na(x))) {
     return(rep(NA_real_, length(x)))
@@ -378,6 +505,7 @@ z_score <- function(x) {
   as.numeric((x - mean(x, na.rm = TRUE)) / stats::sd(x, na.rm = TRUE))
 }
 
+# Score the Interpersonal Reactivity Index and create analysis-ready participant flags.
 score_iri <- function(df) {
   iri_scales <- list(
     iri_fs = c("FS1", "FS5", "FS7", "FS12", "FS16", "FS20", "FS25"),
@@ -386,80 +514,84 @@ score_iri <- function(df) {
     iri_pd = c("PD6", "PD10", "PD13", "PD18", "PD22", "PD27")
   )
 
-  iri_items <- unlist(iri_scales, use.names = FALSE)
+  iri_items <- unlist(iri_scales, use.names = FALSE) # The total IRI composite pools all subscale items.
 
   scored <- df
-  scored$iri_total <- row_mean_with_floor(scored, iri_items, min_non_missing = ceiling(length(iri_items) * 0.8))
-  scored$iri_total_z <- z_score(scored$iri_total)
+  scored$iri_total <- row_mean_with_floor(scored, iri_items, min_non_missing = ceiling(length(iri_items) * 0.8)) # Require 80% completion for the main empathy composite.
+  scored$iri_total_z <- z_score(scored$iri_total) # Standardization makes the Tobit coefficient interpretable per SD increase in empathy.
 
   for (scale_name in names(iri_scales)) {
     scale_items <- iri_scales[[scale_name]]
     scored[[scale_name]] <- row_mean_with_floor(
       scored,
       scale_items,
-      min_non_missing = max(1L, floor(length(scale_items) * 0.75))
+      min_non_missing = max(1L, floor(length(scale_items) * 0.75)) # Subscales allow slightly more missingness because they contain fewer items.
     )
   }
 
-  scored$sex_label <- ifelse(scored$sex == 2, "Man", "Woman")
+  scored$sex_label <- ifelse(scored$sex == 2, "Man", "Woman") # Human-readable labels make summaries and plots easier to read.
   scored$faculty_player_label <- ifelse(scored$faculty_player == 2, "Engineering", "Humanities")
   scored$treatment_label <- ifelse(scored$treatment == 2, "Observer first", "Victim first")
-  scored$attention_pass <- scored$ac1 == 1 & scored$ac2 == 1
-  scored$analysis_include <- scored$attention_pass & !is.na(scored$iri_total)
+  scored$attention_pass <- scored$ac1 == 1 & scored$ac2 == 1 # Primary sample quality screen.
+  scored$analysis_include <- scored$attention_pass & !is.na(scored$iri_total) # The main models keep only valid empathy scores plus passed checks.
   scored
 }
 
+# Treatment assignment changes whether earlier stages are experienced as victim
+# or observer trials, so role must be reconstructed from treatment plus stage.
 derive_role <- function(treatment, stage) {
   if (treatment == 1L) {
     if (stage <= 5L) {
-      return("victim")
+      return("victim") # Treatment 1 starts with the participant in the victim perspective.
     }
-    return("observer")
+    return("observer") # Later stages switch to the observer perspective.
   }
 
   if (stage <= 5L) {
-    return("observer")
+    return("observer") # Treatment 2 uses the opposite ordering.
   }
   "victim"
 }
 
+# Reshape the wide workbook into negotiator-level rows, which is the unit used
+# by the descriptive tables and Tobit models.
 prepare_analysis_data <- function(df) {
-  participants <- score_iri(df)
-  n_rows <- nrow(participants) * 20L
-  long_rows <- vector("list", n_rows)
+  participants <- score_iri(df) # Start from the participant file enriched with empathy scores and inclusion flags.
+  n_rows <- nrow(participants) * 20L # Each participant contributes 10 stages x 2 negotiators = 20 judgment rows.
+  long_rows <- vector("list", n_rows) # Preallocate for speed and to avoid repeated list growth inside loops.
   index <- 1L
 
   for (row_id in seq_len(nrow(participants))) {
-    row <- participants[row_id, , drop = FALSE]
+    row <- participants[row_id, , drop = FALSE] # Keep a one-row data frame so name-based indexing stays consistent.
 
     for (stage in 1:10) {
-      role <- derive_role(as.integer(row$treatment), stage)
+      role <- derive_role(as.integer(row$treatment), stage) # Recover the participant's role in this stage from the crossover design.
 
       for (slot in 1:2) {
-        neg_faculty <- as.integer(row[[sprintf("faculty_neg_%d_s%d", slot, stage)]])
-        victim_faculty <- as.integer(row[[sprintf("faculty_victim_s%d", stage)]])
-        participant_faculty <- as.integer(row$faculty_player)
-        judgement <- as.numeric(row[[sprintf("judgement_n%d_s%d", slot, stage)]])
+        neg_faculty <- as.integer(row[[sprintf("faculty_neg_%d_s%d", slot, stage)]]) # Faculty identity of the focal negotiator.
+        victim_faculty <- as.integer(row[[sprintf("faculty_victim_s%d", stage)]]) # Faculty identity of the harmed party.
+        participant_faculty <- as.integer(row$faculty_player) # Faculty identity of the evaluator.
+        judgement <- as.numeric(row[[sprintf("judgement_n%d_s%d", slot, stage)]]) # Observed bounded outcome used in the Tobit model.
         negotiator_alignment <- if (neg_faculty == 3L) {
-          "control"
+          "control" # Code 3 means the negotiator faculty label was hidden.
         } else if (neg_faculty == participant_faculty) {
-          "ingroup"
+          "ingroup" # Labeled negotiator belongs to the evaluator's own faculty group.
         } else {
-          "outgroup"
+          "outgroup" # Labeled negotiator belongs to the evaluator's opposing faculty group.
         }
 
         long_rows[[index]] <- data.frame(
-          id = as.integer(row$id),
-          stage = stage,
-          negotiator_slot = slot,
-          role = role,
-          role_observer = as.integer(role == "observer"),
+          id = as.integer(row$id), # Participant identifier used for clustering standard errors later.
+          stage = stage, # Scenario stage indicator; included as a fixed effect in the models.
+          negotiator_slot = slot, # Two negotiators are judged in each stage.
+          role = role, # Victim vs observer perspective.
+          role_observer = as.integer(role == "observer"), # Dummy-coded role for regression convenience.
           age = as.numeric(row$age),
           economic_status = as.numeric(row$economic_status),
           sex = as.integer(row$sex),
-          sex_man = as.integer(row$sex == 2),
+          sex_man = as.integer(row$sex == 2), # Binary coding matches the reference-category interpretation in the report.
           participant_faculty = participant_faculty,
-          participant_engineering = as.integer(participant_faculty == 2),
+          participant_engineering = as.integer(participant_faculty == 2), # Engineering is coded 1 so humanities acts as the reference group.
           treatment = as.integer(row$treatment),
           attention_pass = as.logical(row$attention_pass),
           analysis_include = as.logical(row$analysis_include),
@@ -472,32 +604,32 @@ prepare_analysis_data <- function(df) {
           faculty_negotiator = neg_faculty,
           faculty_victim = victim_faculty,
           negotiator_alignment = negotiator_alignment,
-          perp_outgroup = as.integer(negotiator_alignment == "outgroup"),
-          perp_control = as.integer(negotiator_alignment == "control"),
-          victim_outgroup = as.integer(victim_faculty != participant_faculty),
-          same_group_harm = if (neg_faculty == 3L) NA_integer_ else as.integer(neg_faculty == victim_faculty),
-          decision_accept = as.integer(row[[sprintf("decision_neg%d_s%d", slot, stage)]]),
-          comparative_judgement = as.integer(row[[sprintf("judgement_compare_s%d", stage)]]),
-          judgement = judgement,
-          severity = 9 - judgement,
-          condemnation = -judgement,
+          perp_outgroup = as.integer(negotiator_alignment == "outgroup"), # Key H2b/H3 indicator.
+          perp_control = as.integer(negotiator_alignment == "control"), # Separate indicator for hidden-label control trials.
+          victim_outgroup = as.integer(victim_faculty != participant_faculty), # Whether the harmed person belongs to the evaluator's outgroup.
+          same_group_harm = if (neg_faculty == 3L) NA_integer_ else as.integer(neg_faculty == victim_faculty), # H2a is only defined when the negotiator is not in the control condition.
+          decision_accept = as.integer(row[[sprintf("decision_neg%d_s%d", slot, stage)]]), # 1 means the negotiator chose the harmful but payoff-increasing option.
+          comparative_judgement = as.integer(row[[sprintf("judgement_compare_s%d", stage)]]), # Stage-level comparison variable retained for completeness.
+          judgement = judgement, # Raw observed rating on the original -9 to 9 scale.
+          severity = 9 - judgement, # Derived severity measure kept for possible alternate summaries.
+          condemnation = -judgement, # Sign-flipped version where larger values mean harsher condemnation.
           stringsAsFactors = FALSE
         )
-        index <- index + 1L
+        index <- index + 1L # Advance to the next storage slot in the preallocated list.
       }
     }
   }
 
-  judgments_all <- do.call(rbind, long_rows)
-  judgments_all$role <- factor(judgments_all$role, levels = c("victim", "observer"))
+  judgments_all <- do.call(rbind, long_rows) # Collapse the list of row fragments into one long data frame.
+  judgments_all$role <- factor(judgments_all$role, levels = c("victim", "observer")) # Fix reference levels before modeling.
   judgments_all$negotiator_alignment <- factor(
     judgments_all$negotiator_alignment,
     levels = c("ingroup", "outgroup", "control")
   )
 
-  judgments_analysis <- judgments_all[judgments_all$analysis_include, , drop = FALSE]
-  judgments_accept <- judgments_analysis[judgments_analysis$decision_accept == 1L, , drop = FALSE]
-  judgments_betrayal <- judgments_accept[judgments_accept$perp_control == 0L, , drop = FALSE]
+  judgments_analysis <- judgments_all[judgments_all$analysis_include, , drop = FALSE] # Main analysis sample after participant-level screening.
+  judgments_accept <- judgments_analysis[judgments_analysis$decision_accept == 1L, , drop = FALSE] # Harmful decisions only, matching the primary hypotheses.
+  judgments_betrayal <- judgments_accept[judgments_accept$perp_control == 0L, , drop = FALSE] # Remove unlabeled control perpetrators for the same-group-harm test.
 
   list(
     participants = participants,
@@ -508,6 +640,7 @@ prepare_analysis_data <- function(df) {
   )
 }
 
+# Export intermediate analysis datasets so the cleaning and reshape steps remain inspectable.
 write_data_outputs <- function(prep, paths) {
   utils::write.csv(prep$participants, file.path(paths$data_dir, "participants_scored.csv"), row.names = FALSE, na = "")
   utils::write.csv(prep$judgments_all, file.path(paths$data_dir, "judgments_long_all.csv"), row.names = FALSE, na = "")
@@ -515,6 +648,7 @@ write_data_outputs <- function(prep, paths) {
   utils::write.csv(prep$judgments_accept, file.path(paths$data_dir, "judgments_long_accept_only.csv"), row.names = FALSE, na = "")
 }
 
+# Participant-level descriptives summarize the analysis sample after screening.
 build_participant_summary <- function(prep) {
   participants <- prep$participants
   analysis_participants <- participants[participants$analysis_include, , drop = FALSE]
@@ -550,8 +684,9 @@ build_participant_summary <- function(prep) {
   )
 }
 
+# Empathy descriptives report scale location, spread, range, and reliability.
 build_empathy_summary <- function(prep) {
-  participants <- prep$participants[prep$participants$analysis_include, , drop = FALSE]
+  participants <- prep$participants[prep$participants$analysis_include, , drop = FALSE] # Restrict reliability/descriptives to the analyzed participant sample.
   scale_map <- list(
     `IRI total` = c("iri_total", 28L),
     `Fantasy` = c("iri_fs", 7L),
@@ -575,7 +710,7 @@ build_empathy_summary <- function(prep) {
   rows <- lapply(names(scale_map), function(scale_label) {
     scale_info <- scale_map[[scale_label]]
     scale_name <- scale_info[[1]]
-    items <- item_lookup[[scale_name]]
+    items <- item_lookup[[scale_name]] # Pull the actual item names so Cronbach's alpha uses the correct item set.
     data.frame(
       Scale = scale_label,
       Items = as.integer(scale_info[[2]]),
@@ -591,17 +726,18 @@ build_empathy_summary <- function(prep) {
   do.call(rbind, rows)
 }
 
+# Group summaries feed the descriptive tables and uncertainty bars in the figures.
 summarise_group <- function(df, group_vars, outcome = "judgement") {
-  split_index <- interaction(df[, group_vars, drop = FALSE], drop = TRUE, sep = "___")
-  chunks <- split(df, split_index)
+  split_index <- interaction(df[, group_vars, drop = FALSE], drop = TRUE, sep = "___") # Create a unique label for every combination of grouping variables.
+  chunks <- split(df, split_index) # Split the long data into independent subgroup data frames.
 
   rows <- lapply(chunks, function(chunk) {
-    keys <- chunk[1, group_vars, drop = FALSE]
+    keys <- chunk[1, group_vars, drop = FALSE] # The first row carries the subgroup labels.
     keys$Observations <- nrow(chunk)
     keys$MeanJudgement <- safe_mean(chunk[[outcome]])
     keys$SDJudgement <- safe_sd(chunk[[outcome]])
     keys$SEJudgement <- safe_se(chunk[[outcome]])
-    keys$Lower95 <- keys$MeanJudgement - 1.96 * keys$SEJudgement
+    keys$Lower95 <- keys$MeanJudgement - 1.96 * keys$SEJudgement # Wald-style 95% interval for visual summaries.
     keys$Upper95 <- keys$MeanJudgement + 1.96 * keys$SEJudgement
     keys
   })
@@ -611,6 +747,7 @@ summarise_group <- function(df, group_vars, outcome = "judgement") {
   result
 }
 
+# Summarize the amount of usable judgment data and the extent of censoring.
 build_judgement_summary <- function(prep) {
   analysis <- prep$judgments_analysis
   accept <- prep$judgments_accept
@@ -638,6 +775,7 @@ build_judgement_summary <- function(prep) {
   )
 }
 
+# Describe the harmful-decision sample by perpetrator alignment and role.
 build_harmful_descriptives <- function(prep) {
   harmful <- prep$judgments_accept
   summary_df <- summarise_group(
@@ -650,6 +788,10 @@ build_harmful_descriptives <- function(prep) {
   summary_df
 }
 
+# Plotting helpers -------------------------------------------------------------
+# The project exports static, high-contrast figures meant to remain readable in
+# Word/PDF output and for readers with low vision.
+
 get_plot_style <- function() {
   list(
     ink = "#1A1A1A",
@@ -661,6 +803,7 @@ get_plot_style <- function() {
   )
 }
 
+# Open a PNG device at print-quality resolution.
 open_accessible_png <- function(file_path, width = 8, height = 5) {
   grDevices::png(
     filename = file_path,
@@ -672,6 +815,7 @@ open_accessible_png <- function(file_path, width = 8, height = 5) {
   )
 }
 
+# Base plotting parameters are centralized so every figure shares the same look.
 apply_accessible_theme <- function() {
   style <- get_plot_style()
   graphics::par(
@@ -692,6 +836,7 @@ apply_accessible_theme <- function() {
   )
 }
 
+# Age is summarized only for participants who survive the main analysis filter.
 plot_age_histogram <- function(prep, paths) {
   participants <- prep$participants[prep$participants$analysis_include, , drop = FALSE]
   style <- get_plot_style()
@@ -701,7 +846,7 @@ plot_age_histogram <- function(prep, paths) {
   on.exit(grDevices::dev.off(), add = TRUE)
   apply_accessible_theme()
 
-  age_breaks <- pretty(participants$age, n = 8)
+  age_breaks <- pretty(participants$age, n = 8) # pretty() chooses human-readable bin edges.
   hist_info <- graphics::hist(
     participants$age,
     breaks = age_breaks,
@@ -716,6 +861,7 @@ plot_age_histogram <- function(prep, paths) {
   invisible(file_path)
 }
 
+# The empathy histogram shows the distribution of the main psychological predictor.
 plot_empathy_histogram <- function(prep, paths) {
   participants <- prep$participants[prep$participants$analysis_include, , drop = FALSE]
   style <- get_plot_style()
@@ -739,6 +885,7 @@ plot_empathy_histogram <- function(prep, paths) {
   invisible(file_path)
 }
 
+# Compare raw judgments for harmful deals that were accepted versus rejected.
 plot_severity_by_decision <- function(prep, paths) {
   analysis <- prep$judgments_analysis
   style <- get_plot_style()
@@ -748,7 +895,7 @@ plot_severity_by_decision <- function(prep, paths) {
   on.exit(grDevices::dev.off(), add = TRUE)
   apply_accessible_theme()
 
-  analysis$decision_label <- ifelse(analysis$decision_accept == 1, "Accepted harmful deal", "Rejected harmful deal")
+  analysis$decision_label <- ifelse(analysis$decision_accept == 1, "Accepted harmful deal", "Rejected harmful deal") # Human-readable labels for the boxplot grouping.
   graphics::boxplot(
     judgement ~ decision_label,
     data = analysis,
@@ -764,6 +911,7 @@ plot_severity_by_decision <- function(prep, paths) {
   invisible(file_path)
 }
 
+# Plot group means with 95% intervals to visualize H2/H3 patterns descriptively.
 plot_harmful_group_means <- function(prep, paths) {
   harmful_summary <- build_harmful_descriptives(prep)
   style <- get_plot_style()
@@ -774,7 +922,7 @@ plot_harmful_group_means <- function(prep, paths) {
     ifelse(harmful_summary$role == "victim", "victim", "observer")
   )
 
-  x_pos <- seq_len(nrow(harmful_summary))
+  x_pos <- seq_len(nrow(harmful_summary)) # One plotting position per subgroup mean.
 
   open_accessible_png(file_path, width = 9, height = 5.5)
   on.exit(grDevices::dev.off(), add = TRUE)
@@ -783,7 +931,7 @@ plot_harmful_group_means <- function(prep, paths) {
   graphics::plot(
     x = x_pos,
     y = harmful_summary$MeanJudgement,
-    ylim = range(c(harmful_summary$Lower95, harmful_summary$Upper95), na.rm = TRUE),
+    ylim = range(c(harmful_summary$Lower95, harmful_summary$Upper95), na.rm = TRUE), # Ensure the confidence bars fully fit in the plotting window.
     xaxt = "n",
     xlab = "",
     ylab = "Mean moral-judgment score among harmful decisions",
@@ -821,6 +969,7 @@ plot_harmful_group_means <- function(prep, paths) {
   invisible(file_path)
 }
 
+# Create all figures in one pass so the report can refer to a single bundle.
 make_figures <- function(prep, paths) {
   list(
     age = plot_age_histogram(prep, paths),
@@ -829,6 +978,10 @@ make_figures <- function(prep, paths) {
     group = plot_harmful_group_means(prep, paths)
   )
 }
+
+# Modeling helpers -------------------------------------------------------------
+# These functions translate raw coefficient names into readable labels and fit
+# Tobit models that account for censoring at the observed judgment bounds.
 
 label_term <- function(term) {
   direct_map <- c(
@@ -865,9 +1018,10 @@ label_term <- function(term) {
   term
 }
 
+# Pull coefficients, robust SEs, p-values, and confidence intervals from survreg output.
 extract_model_table <- function(model_fit) {
   summary_obj <- summary(model_fit)
-  table_matrix <- summary_obj$table
+  table_matrix <- summary_obj$table # survreg exposes coefficient summaries as a matrix in summary(model)$table.
   model_df <- data.frame(
     term = rownames(table_matrix),
     estimate = table_matrix[, 1],
@@ -879,16 +1033,17 @@ extract_model_table <- function(model_fit) {
   )
   model_df$conf_low <- model_df$estimate - 1.96 * model_df$std_error
   model_df$conf_high <- model_df$estimate + 1.96 * model_df$std_error
-  model_df$label <- vapply(model_df$term, label_term, character(1))
+  model_df$label <- vapply(model_df$term, label_term, character(1)) # Convert design-matrix names into report-friendly labels.
   model_df
 }
 
+# Fit statistics document sample size, censoring counts, and rough pseudo-R2.
 extract_model_stats <- function(model_fit, model_data, model_label) {
   loglik_values <- model_fit$loglik
   pseudo_r2 <- NA_real_
 
   if (!is.null(loglik_values) && length(loglik_values) == 2L && !isTRUE(all.equal(loglik_values[1], 0))) {
-    pseudo_r2 <- 1 - (loglik_values[2] / loglik_values[1])
+    pseudo_r2 <- 1 - (loglik_values[2] / loglik_values[1]) # McFadden-style pseudo-R2 using null and fitted log-likelihoods.
   }
 
   data.frame(
@@ -904,10 +1059,13 @@ extract_model_stats <- function(model_fit, model_data, model_label) {
   )
 }
 
+# Implement a Tobit model via interval-censored Gaussian regression:
+# values at -9 are treated as left-censored, values at 9 as right-censored, and
+# interior values are observed exactly.
 fit_clustered_tobit <- function(data, rhs_formula) {
   model_data <- data
-  model_data$lower_endpoint <- ifelse(model_data$judgement <= -9, -Inf, model_data$judgement)
-  model_data$upper_endpoint <- ifelse(model_data$judgement >= 9, Inf, model_data$judgement)
+  model_data$lower_endpoint <- ifelse(model_data$judgement <= -9, -Inf, model_data$judgement) # Left-censored observations only tell us the latent score is at or below -9.
+  model_data$upper_endpoint <- ifelse(model_data$judgement >= 9, Inf, model_data$judgement) # Right-censored observations only tell us the latent score is at or above 9.
 
   formula_obj <- stats::as.formula(
     paste(
@@ -919,15 +1077,16 @@ fit_clustered_tobit <- function(data, rhs_formula) {
   survival::survreg(
     formula = formula_obj,
     data = model_data,
-    dist = "gaussian",
-    robust = TRUE,
-    cluster = model_data$id,
+    dist = "gaussian", # Gaussian latent errors reproduce the classical Tobit assumption.
+    robust = TRUE, # Sandwich SEs make inference less sensitive to mild misspecification.
+    cluster = model_data$id, # Cluster by participant because each person contributes repeated judgments.
     model = TRUE,
     x = TRUE,
     y = TRUE
   )
 }
 
+# Fit the three core model specifications used in the report and export each result.
 fit_models <- function(prep, paths) {
   if (!requireNamespace("survival", quietly = TRUE)) {
     stop("The 'survival' package is required to fit Tobit models.", call. = FALSE)
@@ -938,20 +1097,20 @@ fit_models <- function(prep, paths) {
     "iri_total_z:perp_outgroup + iri_total_z:perp_control +",
     "role_observer + participant_engineering + sex_man + age + economic_status +",
     "factor(stage) + factor(negotiator_slot)"
-  )
+  ) # Main harmful-decision model for H1, H2b, and H3.
 
   betrayal_rhs <- paste(
     "iri_total_z + same_group_harm + perp_outgroup + victim_outgroup +",
     "role_observer + participant_engineering + sex_man + age + economic_status +",
     "factor(stage) + factor(negotiator_slot)"
-  )
+  ) # Same-group-harm model for H2a; the control condition is excluded because same-group harm is undefined there.
 
   full_rhs <- paste(
     "decision_accept + iri_total_z + perp_outgroup + perp_control + victim_outgroup +",
     "iri_total_z:perp_outgroup + iri_total_z:perp_control +",
     "role_observer + participant_engineering + sex_man + age + economic_status +",
     "factor(stage) + factor(negotiator_slot)"
-  )
+  ) # Expanded full-sample model used as a robustness/descriptive check.
 
   model_specs <- list(
     main_harmful_tobit = list(
@@ -987,7 +1146,7 @@ fit_models <- function(prep, paths) {
       file.path(paths$models_dir, paste0(model_name, "_fit_stats.csv")),
       row.names = FALSE
     )
-    saveRDS(fit, file = file.path(paths$models_dir, paste0(model_name, ".rds")))
+    saveRDS(fit, file = file.path(paths$models_dir, paste0(model_name, ".rds"))) # Save the fitted object so diagnostics or re-reporting can happen without refitting.
 
     list(
       name = model_name,
@@ -1008,6 +1167,7 @@ get_term_row <- function(model_table, term_name) {
   model_table[model_table$term == term_name, , drop = FALSE]
 }
 
+# Translate coefficient sign plus p-value into a hypothesis-testing verdict.
 term_verdict <- function(estimate, p_value, expected = "positive") {
   if (is.na(estimate) || is.na(p_value)) {
     return("Not estimable")
@@ -1024,6 +1184,7 @@ term_verdict <- function(estimate, p_value, expected = "positive") {
   "Contradicted"
 }
 
+# Turn one model term into a reader-facing hypothesis decision row.
 interpret_hypothesis_row <- function(hypothesis_id, hypothesis_text, row_df, expected = "positive") {
   if (nrow(row_df) == 0L) {
     return(data.frame(
@@ -1041,7 +1202,7 @@ interpret_hypothesis_row <- function(hypothesis_id, hypothesis_text, row_df, exp
     ))
   }
 
-  verdict <- term_verdict(row_df$estimate, row_df$p_value, expected = expected)
+  verdict <- term_verdict(row_df$estimate, row_df$p_value, expected = expected) # Separate statistical detectability from substantive direction.
   null_decision <- if (is.na(row_df$p_value)) {
     "Not estimable"
   } else if (row_df$p_value < 0.05) {
@@ -1096,6 +1257,7 @@ interpret_hypothesis_row <- function(hypothesis_id, hypothesis_text, row_df, exp
   )
 }
 
+# Evaluate the four preregistered/substantive hypotheses against the fitted models.
 validate_hypotheses <- function(model_results) {
   main_table <- model_results$main_harmful_tobit$coefficients
   betrayal_table <- model_results$betrayal_tobit$coefficients
@@ -1128,6 +1290,9 @@ validate_hypotheses <- function(model_results) {
   )
 }
 
+# Narrative helpers ------------------------------------------------------------
+# These functions convert numeric results into plain-language report text.
+
 describe_key_term <- function(model_table, term_name, positive_label, negative_label) {
   row_df <- get_term_row(model_table, term_name)
   if (nrow(row_df) == 0L) {
@@ -1146,6 +1311,7 @@ describe_key_term <- function(model_table, term_name, positive_label, negative_l
   )
 }
 
+# Summarize the participant count and the number of negotiator-level observations.
 compose_sample_narrative <- function(prep) {
   participants <- prep$participants
   analysis_participants <- participants[participants$analysis_include, , drop = FALSE]
@@ -1162,6 +1328,7 @@ compose_sample_narrative <- function(prep) {
   )
 }
 
+# Highlight descriptive differences before any regression adjustment.
 compose_descriptive_narrative <- function(prep) {
   analysis <- prep$judgments_analysis
   harmful <- prep$judgments_accept
@@ -1185,6 +1352,7 @@ compose_descriptive_narrative <- function(prep) {
   )
 }
 
+# Summarize the most important model coefficients in prose.
 compose_model_narrative <- function(model_results) {
   main_table <- model_results$main_harmful_tobit$coefficients
   betrayal_table <- model_results$betrayal_tobit$coefficients
@@ -1219,6 +1387,7 @@ compose_model_narrative <- function(model_results) {
   )
 }
 
+# Concatenate the hypothesis decisions into one paragraph for the reports.
 compose_hypothesis_narrative <- function(hypothesis_table) {
   decision_lines <- apply(hypothesis_table, 1, function(row) {
     paste0(
@@ -1232,6 +1401,7 @@ compose_hypothesis_narrative <- function(hypothesis_table) {
   paste(decision_lines, collapse = " ")
 }
 
+# Explain why Tobit is used and how much censoring is actually present.
 compose_assumptions_narrative <- function(prep, tables) {
   participant_n <- nrow(prep$participants[prep$participants$analysis_include, , drop = FALSE])
   harmful_n <- nrow(prep$judgments_accept)
@@ -1247,6 +1417,7 @@ compose_assumptions_narrative <- function(prep, tables) {
   )
 }
 
+# Record the empirical materials and the broad analysis steps for methods reporting.
 compose_materials_methods_narrative <- function(prep) {
   paste(
     "Materials. The analysis uses the workbook data_final_FLORIDA.xlsx, the project codebook datacard.md, and the substantive framing in hypotheses.md.",
@@ -1255,6 +1426,7 @@ compose_materials_methods_narrative <- function(prep) {
   )
 }
 
+# Spell out the cleaning rules so readers can reconstruct sample inclusion.
 compose_data_cleaning_narrative <- function(prep) {
   participants <- prep$participants
   analysis_participants <- participants[participants$analysis_include, , drop = FALSE]
@@ -1272,6 +1444,7 @@ compose_data_cleaning_narrative <- function(prep) {
   )
 }
 
+# Explain the key modeling choices that connect the raw workbook to the regressions.
 compose_transformation_narrative <- function() {
   paste(
     "Variable handling and transformation were kept close to the observed data structure.",
@@ -1282,6 +1455,7 @@ compose_transformation_narrative <- function() {
   )
 }
 
+# Report the main inferential takeaways while keeping the sign conventions explicit.
 compose_results_narrative <- function(model_results, hypothesis_table) {
   main_table <- model_results$main_harmful_tobit$coefficients
   key_rows <- list(
@@ -1304,6 +1478,7 @@ compose_results_narrative <- function(model_results, hypothesis_table) {
   )
 }
 
+# The discussion emphasizes uncertainty, sample size, and the strongest directional signal.
 compose_discussion_narrative <- function(hypothesis_table) {
   h2a_row <- hypothesis_table[hypothesis_table$Hypothesis == "H2a", , drop = FALSE]
 
@@ -1316,6 +1491,7 @@ compose_discussion_narrative <- function(hypothesis_table) {
   )
 }
 
+# Conclusion text is separated so it can be reused across output formats.
 compose_conclusion_narrative <- function() {
   paste(
     "In conclusion, the bounded moral-judgment data are well suited to a Tobit framework, and the reporting pipeline now documents the full workflow from raw workbook to publication-style outputs.",
@@ -1324,6 +1500,7 @@ compose_conclusion_narrative <- function() {
   )
 }
 
+# Provide ASCII-style equations that render cleanly in Word without special math tooling.
 word_equation_lines <- function() {
   c(
     "Observed outcome definition for Word:",
@@ -1347,11 +1524,13 @@ word_equation_lines <- function() {
   )
 }
 
+# Build a portable relative path from the report folder to figures.
 relative_markdown_path <- function(from_dir, to_file) {
   rel <- file.path("..", basename(dirname(to_file)), basename(to_file))
   gsub("\\\\", "/", rel)
 }
 
+# Write all summary tables to disk and return them for immediate report assembly.
 write_tables <- function(prep, model_results, hypothesis_table, paths) {
   participant_summary <- build_participant_summary(prep)
   empathy_summary <- build_empathy_summary(prep)
@@ -1384,6 +1563,7 @@ write_tables <- function(prep, model_results, hypothesis_table, paths) {
   table_bundle
 }
 
+# Convert the Markdown report into Word if Pandoc is installed locally.
 render_word_report <- function(paths) {
   pandoc_path <- find_pandoc_path()
   if (!nzchar(pandoc_path)) {
@@ -1391,8 +1571,8 @@ render_word_report <- function(paths) {
   }
 
   old_wd <- getwd()
-  on.exit(setwd(old_wd), add = TRUE)
-  setwd(paths$report_dir)
+  on.exit(setwd(old_wd), add = TRUE) # Restore the original working directory after rendering.
+  setwd(paths$report_dir) # Render from inside the report folder so relative links resolve correctly.
 
   status <- system2(
     command = pandoc_path,
@@ -1404,9 +1584,11 @@ render_word_report <- function(paths) {
     )
   )
 
-  identical(status, 0L)
+  identical(status, 0L) # Return a clean TRUE/FALSE flag to the calling pipeline.
 }
 
+# Build the standalone LaTeX article line by line so it can be compiled even
+# without rmarkdown or knitr dependencies.
 build_latex_report <- function(prep, model_results, hypothesis_table, tables, figures, paths) {
   hypotheses_source <- if (nzchar(paths$hypotheses_file)) basename(paths$hypotheses_file) else "Not found"
   main_table <- model_results$main_harmful_tobit$coefficients
@@ -1493,9 +1675,10 @@ build_latex_report <- function(prep, model_results, hypothesis_table, tables, fi
     "\\end{document}"
   )
 
-  write_text_file(lines, paths$report_tex)
+  write_text_file(lines, paths$report_tex) # Write the raw LaTeX source for optional manual inspection or editing.
 }
 
+# Compile the LaTeX article twice so references and tables settle correctly.
 render_pdf_report <- function(paths) {
   pdflatex_path <- find_pdflatex_path()
   if (!nzchar(pdflatex_path) || !file.exists(paths$report_tex)) {
@@ -1524,10 +1707,11 @@ render_pdf_report <- function(paths) {
     stderr = TRUE
   )
 
-  status_code <- attr(second_status, "status")
+  status_code <- attr(second_status, "status") # The second run catches cross-references and final compilation state.
   is.null(status_code) || identical(status_code, 0L)
 }
 
+# Build the main Markdown report that most readers will open first.
 build_report <- function(prep, model_results, hypothesis_table, tables, figures, paths) {
   hypotheses_source <- if (nzchar(paths$hypotheses_file)) basename(paths$hypotheses_file) else "Not found"
   main_table <- model_results$main_harmful_tobit$coefficients
@@ -1623,12 +1807,17 @@ build_report <- function(prep, model_results, hypothesis_table, tables, figures,
   write_text_file(lines, paths$report_md)
 }
 
+# Save the R session details to support exact reproducibility of package versions.
 write_session_info <- function(paths) {
-  info_lines <- capture.output(sessionInfo())
+  info_lines <- capture.output(sessionInfo()) # capture.output converts the printed session summary into plain text lines.
   write_text_file(info_lines, paths$session_info)
 }
 
+# End-to-end orchestration: ingest data, score variables, fit models, export
+# tables/figures/reports, and return everything in one object for scripting use.
 run_full_pipeline <- function(project_root = ".") {
+  ensure_pipeline_dependencies()
+
   paths <- get_project_paths(project_root)
   ensure_output_dirs(paths)
 

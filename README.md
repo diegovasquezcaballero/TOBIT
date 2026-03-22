@@ -45,6 +45,11 @@ The pipeline is intentionally dependency-light.
 - Word export: `pandoc`.
 - Other Tobit packages considered: `AER`, `VGAM`, and `censReg`.
 
+On startup, the pipeline now attempts to install missing required R packages from CRAN automatically:
+
+- `survival` is treated as mandatory.
+- `readxl` is attempted automatically, but the pipeline can still proceed if Python with both `pandas` and `openpyxl` is available.
+
 In the current local environment, `survival` and `pandoc` are available and the code can use Python as the Excel fallback. The main implementation stays with `survival::survreg()` because it supports clustered robust inference cleanly for this project. `AER`, `VGAM`, and `censReg` are reported as optional alternatives when available.
 
 ## Run
@@ -54,6 +59,8 @@ From the project root:
 ```powershell
 & 'C:\Program Files\R\R-4.5.1\bin\Rscript.exe' run_pipeline.R
 ```
+
+If this is the first run on a new machine, the script may spend extra time installing missing R packages before the analysis starts.
 
 If `Rscript` is already on your PATH, this also works:
 
