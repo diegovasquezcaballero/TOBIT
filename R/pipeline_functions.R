@@ -168,12 +168,12 @@ python_excel_fallback_available <- function() {
     return(FALSE)
   }
 
-  check_output <- system2(
+  check_output <- suppressWarnings(system2(
     command = python_cmd,
     args = c("-c", shQuote("import pandas, openpyxl")),
     stdout = TRUE,
     stderr = TRUE
-  )
+  ))
 
   status <- attr(check_output, "status")
   is.null(status) || identical(status, 0L)
@@ -990,13 +990,74 @@ plot_harmful_group_means <- function(prep, paths) {
   invisible(file_path)
 }
 
+# Bar plot of judgment frequencies to illustrate censoring
+plot_judgement_frequency <- function(prep, paths) {
+  analysis <- prep$judgments_analysis
+  style <- get_plot_style()
+  file_path <- file.path(paths$figures_dir, "figure_eda_judgement_frequency.png")
+
+  open_accessible_png(file_path)
+  on.exit(grDevices::dev.off(), add = TRUE)
+  apply_accessible_theme()
+
+  counts <- table(factor(analysis$judgement, levels = -9:9))
+  
+  bp <- graphics::barplot(
+    counts,
+    col = style$primary,
+    border = NA,
+    xlab = "Moral Judgment (-9 to 9)",
+    ylab = "Frequency",
+    main = "Frequency of Moral Judgments (Illustrating Censoring)",
+    las = 1,
+    ylim = c(0, max(counts) * 1.1)
+  )
+  
+  invisible(file_path)
+}
+
+# Plot judgments vs the 4 IRI subscales
+plot_judgement_by_iri_subscales <- function(prep, paths) {
+  analysis <- prep$judgments_analysis
+  style <- get_plot_style()
+  file_path <- file.path(paths$figures_dir, "figure_eda_judgement_by_iri.png")
+
+  open_accessible_png(file_path, width = 10, height = 8)
+  on.exit(grDevices::dev.off(), add = TRUE)
+  apply_accessible_theme()
+  
+  graphics::par(mfrow = c(2, 2)) # 2x2 grid
+  
+  subscales <- c("iri_fs" = "Fantasy", "iri_ec" = "Empathic Concern", 
+                 "iri_pt" = "Perspective Taking", "iri_pd" = "Personal Distress")
+  
+  for (var in names(subscales)) {
+    graphics::plot(
+      analysis[[var]],
+      analysis$judgement,
+      pch = 16,
+      col = paste0(style$primary_dark, "40"), # Add transparency 
+      xlab = subscales[[var]],
+      ylab = "Moral Judgment",
+      main = paste("Judgment by", subscales[[var]])
+    )
+    # Add trend line
+    fit <- stats::lm(judgement ~ analysis[[var]], data = analysis)
+    graphics::abline(fit, col = style$ink, lwd = 2)
+  }
+  
+  invisible(file_path)
+}
+
 # Create all figures in one pass so the report can refer to a single bundle.
 make_figures <- function(prep, paths) {
   list(
     age = plot_age_histogram(prep, paths),
     empathy = plot_empathy_histogram(prep, paths),
     decision = plot_severity_by_decision(prep, paths),
-    group = plot_harmful_group_means(prep, paths)
+    group = plot_harmful_group_means(prep, paths),
+    judgement_freq = plot_judgement_frequency(prep, paths),
+    iri_scatter = plot_judgement_by_iri_subscales(prep, paths)
   )
 }
 
@@ -1552,6 +1613,30 @@ relative_markdown_path <- function(from_dir, to_file) {
   gsub("\\\\", "/", rel)
 }
 
+# Generate Pearson correlations between judgments and empathy subscales.
+build_eda_correlations <- function(prep) {
+  analysis <- prep$judgments_analysis
+  
+  subscales <- c("iri_total", "iri_fs", "iri_ec", "iri_pt", "iri_pd")
+  rows <- lapply(subscales, function(var) {
+    if (var %in% names(analysis) && !all(is.na(analysis[[var]]))) {
+      cor_test <- stats::cor.test(analysis$judgement, analysis[[var]], method = "pearson")
+      data.frame(
+        Subscale = var,
+        Pearson_r = cor_test$estimate,
+        P_value = cor_test$p.value,
+        CI_low = cor_test$conf.int[1],
+        CI_high = cor_test$conf.int[2],
+        stringsAsFactors = FALSE
+      )
+    }
+  })
+  
+  res <- do.call(rbind, rows)
+  rownames(res) <- NULL
+  res
+}
+
 # Write all summary tables to disk and return them for immediate report assembly.
 write_tables <- function(prep, model_results, hypothesis_table, paths) {
   participant_summary <- build_participant_summary(prep)
@@ -1571,7 +1656,8 @@ write_tables <- function(prep, model_results, hypothesis_table, paths) {
     harmful_summary = harmful_summary,
     package_summary = package_summary,
     model_fit_summary = model_fit_summary,
-    hypothesis_summary = hypothesis_table
+    hypothesis_summary = hypothesis_table,
+    eda_correlations = build_eda_correlations(prep)
   )
 
   for (table_name in names(table_bundle)) {
@@ -1668,6 +1754,12 @@ build_latex_report <- function(prep, model_results, hypothesis_table, tables, fi
     "\\subsection{Empathy Scale Quality}",
     to_latex_table(tables$empathy_summary, "Empathy scale summary.", "tab:empathy_summary"),
     "\\section{Results}",
+    "\\subsection{Exploratory Data Analysis}",
+    escape_latex("We first explore the raw dependent variable, showing its bounded nature and the piling up at the endpoints which justifies the Tobit approach."),
+    latex_include_graphic(file.path("..", "figures", basename(figures$judgement_freq)), "Frequency of moral judgments illustrating censoring.", "fig:eda_freq"),
+    escape_latex("Additionally, the following table and scatterplots summarize the relationship between moral judgments and each empathy subscale."),
+    to_latex_table(tables$eda_correlations, "Pearson correlations between judgements and empathy subscales.", "tab:eda_correlations"),
+    latex_include_graphic(file.path("..", "figures", basename(figures$iri_scatter)), "Scatterplots of judgment by IRI subscales.", "fig:eda_scatter"),
     "\\subsection{Descriptive Results}",
     escape_latex(compose_descriptive_narrative(prep)),
     to_latex_table(tables$judgement_summary, "Judgment summary.", "tab:judgement_summary"),
@@ -1799,6 +1891,17 @@ build_report <- function(prep, model_results, hypothesis_table, tables, figures,
     "",
     "## Assumptions and Sample Size",
     compose_assumptions_narrative(prep, tables),
+    "",
+    "## Exploratory Data Analysis",
+    "We first explore the raw dependent variable, showing its bounded nature and the piling up at the endpoints which justifies the Tobit approach.",
+    "",
+    paste0("![Judgment Frequency](", relative_markdown_path(paths$report_dir, figures$judgement_freq), ")"),
+    "",
+    "Additionally, the following table and scatterplots summarize the relationship between moral judgments and each empathy subscale.",
+    "",
+    to_markdown_table(tables$eda_correlations, digits = 3),
+    "",
+    paste0("![Subscale Scatterplots](", relative_markdown_path(paths$report_dir, figures$iri_scatter), ")"),
     "",
     "## Descriptive Patterns",
     compose_descriptive_narrative(prep),

@@ -12,7 +12,7 @@
 \hypersetup{colorlinks=true,linkcolor=black,urlcolor=blue,citecolor=black}
 \title{Tobit Regression Analysis Report}
 \author{Automated Analysis Pipeline}
-\date{Generated on 2026-03-22 11:19 -05}
+\date{Generated on 2026-03-22 11:32 -05}
 \begin{document}
 \maketitle
 \begin{abstract}
@@ -81,6 +81,37 @@ Personal distress & 6 & 1.918 & 0.635 & 0.000 & 3.000 & 0.521 \\
 \end{tabular}
 \end{table}
 \section{Results}
+\subsection{Exploratory Data Analysis}
+We first explore the raw dependent variable, showing its bounded nature and the piling up at the endpoints which justifies the Tobit approach.
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.92\textwidth]{../figures/figure_eda_judgement_frequency.png}
+\caption{Frequency of moral judgments illustrating censoring.}
+\label{fig:eda_freq}
+\end{figure}
+Additionally, the following table and scatterplots summarize the relationship between moral judgments and each empathy subscale.
+\begin{table}[H]
+\centering
+\caption{Pearson correlations between judgements and empathy subscales.}
+\label{tab:eda_correlations}
+\begin{tabular}{lllll}
+\toprule
+Subscale & Pearson\_r & P\_value & CI\_low & CI\_high \\
+\midrule
+iri\_total & 0.008 & 0.785 & -0.050 & 0.066 \\
+iri\_fs & 0.005 & 0.856 & -0.052 & 0.063 \\
+iri\_ec & -0.092 & 0.002 & -0.149 & -0.034 \\
+iri\_pt & 0.042 & 0.154 & -0.016 & 0.099 \\
+iri\_pd & 0.061 & 0.037 & 0.004 & 0.118 \\
+\bottomrule
+\end{tabular}
+\end{table}
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.92\textwidth]{../figures/figure_eda_judgement_by_iri.png}
+\caption{Scatterplots of judgment by IRI subscales.}
+\label{fig:eda_scatter}
+\end{figure}
 \subsection{Descriptive Results}
 The observed Tobit outcome is the raw moral-judgment score from -9 to 9, where lower values indicate harsher condemnation. Descriptively, accepted harmful deals receive much lower ratings than rejected deals (mean judgment -3.19 versus 6.21 ). Within the harmful-decision sample, same-faculty harm averages -3.55 judgment points compared with -2.91 for cross-faculty harm. Outgroup perpetrators average -3.12 judgment points versus -3.34 for labeled ingroup perpetrators.
 \begin{table}[H]

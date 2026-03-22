@@ -1,6 +1,6 @@
 # Tobit Regression Pipeline Report
 
-Generated on 2026-03-22 11:19 -05.
+Generated on 2026-03-22 11:32 -05.
 
 ## Inputs
 - Dataset: `data_final_FLORIDA.xlsx`
@@ -74,6 +74,23 @@ The local environment only has `survival` installed. `AER`, `VGAM`, and `censReg
 
 ## Assumptions and Sample Size
 The Tobit model is appropriate here because the observed dependent variable is bounded at -9 and 9 and the sample includes observations piled up at both limits. In the harmful-decision sample there are 569 negotiator-level observations from 58 participants. The observed censoring shares are 29.9% at the lower bound and 4.7% at the upper bound. Substantive interpretation assumes a latent continuous evaluation process, approximately normal model errors, and correct specification of the linear predictor. Inference is clustered by participant to address repeated judgments within persons, but the estimates should still be read cautiously because the participant count is modest.
+
+## Exploratory Data Analysis
+We first explore the raw dependent variable, showing its bounded nature and the piling up at the endpoints which justifies the Tobit approach.
+
+![Judgment Frequency](../figures/figure_eda_judgement_frequency.png)
+
+Additionally, the following table and scatterplots summarize the relationship between moral judgments and each empathy subscale.
+
+| Subscale | Pearson_r | P_value | CI_low | CI_high |
+| --- | --- | --- | --- | --- |
+| iri_total | 0.008 | 0.785 | -0.050 | 0.066 |
+| iri_fs | 0.005 | 0.856 | -0.052 | 0.063 |
+| iri_ec | -0.092 | 0.002 | -0.149 | -0.034 |
+| iri_pt | 0.042 | 0.154 | -0.016 | 0.099 |
+| iri_pd | 0.061 | 0.037 | 0.004 | 0.118 |
+
+![Subscale Scatterplots](../figures/figure_eda_judgement_by_iri.png)
 
 ## Descriptive Patterns
 The observed Tobit outcome is the raw moral-judgment score from -9 to 9, where lower values indicate harsher condemnation. Descriptively, accepted harmful deals receive much lower ratings than rejected deals (mean judgment -3.19 versus 6.21 ). Within the harmful-decision sample, same-faculty harm averages -3.55 judgment points compared with -2.91 for cross-faculty harm. Outgroup perpetrators average -3.12 judgment points versus -3.34 for labeled ingroup perpetrators.
